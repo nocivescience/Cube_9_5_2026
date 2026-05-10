@@ -17,6 +17,7 @@ int main() {
 
     // 2. CREACIÓN DEL CUBO FÍSICO
     btCollisionShape* shape = new btBoxShape(btVector3(1, 1, 1));
+    // btCollisionShape* shape = new btBoxShape(btVector3(1,1,1));
     btTransform transform;
     transform.setIdentity();
     transform.setOrigin(btVector3(0, 0, 0)); // Centrado en el origen
@@ -50,7 +51,9 @@ int main() {
     while (window.isOpen()) {
         // Manejo de eventos estilo SFML 3
         while (const std::optional event = window.pollEvent()) {
+        // while (const std::optional event = window.pollEvent())
             if (event->is<sf::Event::Closed>())
+            // if (event->is<sf::Event::Closed>())
                 window.close();
         }
 
