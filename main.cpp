@@ -1,84 +1,121 @@
 #include <SFML/Window.hpp>
 #include <SFML/OpenGL.hpp>
-#include <btBulletDynamicsCommon.h>
-#include <iostream>
+#include <cmath>
 #include <optional>
 
+// ------------------------------------------------------------------
+// Mini quaternion propio (reemplaza a btQuaternion / btTransform)
+// ------------------------------------------------------------------
+struct Quat {
+    float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
+
+    Quat normalized() const {
+        float len = std::sqrt(x*x + y*y + z*z + w*w);
+        if (len < 1e-8f) return Quat{0,0,0,1};
+        return Quat{ x/len, y/len, z/len, w/len };
+    }
+
+    // Integra la rotación dado un vector de velocidad angular (rad/s) y dt.
+    // Método: q' = q + 0.5 * (omega_quat * q) * dt, luego normalizar.
+    void integrate(float wx, float wy, float wz, float dt) {
+        Quat omega{ wx, wy, wz, 0.f };
+        Quat dq = multiply(omega, *this);
+        x += 0.5f * dq.x * dt;
+        y += 0.5f * dq.y * dt;
+        z += 0.5f * dq.z * dt;
+        w += 0.5f * dq.w * dt;
+        *this = normalized();
+    }
+
+    static Quat multiply(const Quat& a, const Quat& b) {
+        return Quat{
+            a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+            a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+            a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+            a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z
+        };
+    }
+
+    // Genera una matriz 4x4 en formato column-major, igual que
+    // btTransform::getOpenGLMatrix, lista para glMultMatrixf.
+    void toOpenGLMatrix(float* m, float px = 0.f, float py = 0.f, float pz = 0.f) const {
+        float xx = x*x, yy = y*y, zz = z*z;
+        float xy = x*y, xz = x*z, yz = y*z;
+        float wx = w*x, wy = w*y, wz = w*z;
+
+        m[0] = 1.f - 2.f*(yy + zz);
+        m[1] = 2.f*(xy + wz);
+        m[2] = 2.f*(xz - wy);
+        m[3] = 0.f;
+
+        m[4] = 2.f*(xy - wz);
+        m[5] = 1.f - 2.f*(xx + zz);
+        m[6] = 2.f*(yz + wx);
+        m[7] = 0.f;
+
+        m[8]  = 2.f*(xz + wy);
+        m[9]  = 2.f*(yz - wx);
+        m[10] = 1.f - 2.f*(xx + yy);
+        m[11] = 0.f;
+
+        m[12] = px;
+        m[13] = py;
+        m[14] = pz;
+        m[15] = 1.f;
+    }
+};
+
 int main() {
-    // 1. CONFIGURACIÓN DE MUNDO FÍSICO (BULLET)
-    auto* colConfig = new btDefaultCollisionConfiguration();
-    auto* dispatcher = new btCollisionDispatcher(colConfig);
-    auto* broadphase = new btDbvtBroadphase();
-    auto* solver = new btSequentialImpulseConstraintSolver;
-    auto* dynamicsWorld = new btDiscreteDynamicsWorld(dispatcher, broadphase, solver, colConfig);
-    
-    // Gravedad en 0 para que el cubo no se caiga y desaparezca de la cámara
-    dynamicsWorld->setGravity(btVector3(0, 0, 0));
+    // ------------------------------------------------------------------
+    // "Cuerpo rígido" simplificado: solo orientación + velocidad angular
+    // ------------------------------------------------------------------
+    Quat orientation; // identidad
+    float angVelX = 0.5f, angVelY = 1.0f, angVelZ = 0.3f; // rad/s, igual que antes
 
-    // 2. CREACIÓN DEL CUBO FÍSICO
-    btCollisionShape* shape = new btBoxShape(btVector3(1, 1, 1));
-    btTransform transform;
-    transform.setIdentity();
-    transform.setOrigin(btVector3(0, 0, 0)); // Centrado en el origen
-
-    btVector3 inertia(0, 0, 0);
-    shape->calculateLocalInertia(1.0f, inertia);
-
-    auto* motionState = new btDefaultMotionState(transform);
-    btRigidBody::btRigidBodyConstructionInfo rbInfo(1.0f, motionState, shape, inertia);
-    auto* body = new btRigidBody(rbInfo);
-    
-    // Le damos una velocidad angular inicial para que rote solo
-    body->setAngularVelocity(btVector3(0.5f, 1.0f, 0.3f));
-    dynamicsWorld->addRigidBody(body);
-
-    // 3. CONFIGURACIÓN DE VENTANA (SFML 3)
-    sf::Window window(sf::VideoMode({800, 600}), "SFML 3 + Bullet: Cubo Rotando");
+    // ------------------------------------------------------------------
+    // Ventana SFML 3
+    // ------------------------------------------------------------------
+    sf::Window window(sf::VideoMode({800, 600}), "SFML 3 (sin Bullet): Cubo Rotando");
     window.setFramerateLimit(60);
 
-    // 4. CONFIGURACIÓN DE OPENGL (Cámara y Luces)
+    // ------------------------------------------------------------------
+    // OpenGL: cámara y proyección
+    // ------------------------------------------------------------------
     glEnable(GL_DEPTH_TEST);
-    
-    // Configurar la Proyección (Perspectiva)
+
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     float aspect = 800.f / 600.f;
-    // glFrustum define el volumen de visión (izquierda, derecha, abajo, arriba, cerca, lejos)
     glFrustum(-aspect * 0.1f, aspect * 0.1f, -0.1f, 0.1f, 0.1f, 100.0f);
 
-    // 5. BUCLE PRINCIPAL
+    const float dt = 1.f / 60.f;
+
+    // ------------------------------------------------------------------
+    // Bucle principal
+    // ------------------------------------------------------------------
     while (window.isOpen()) {
-        // Manejo de eventos estilo SFML 3
         while (const std::optional event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>())
                 window.close();
         }
 
-        // Paso de física
-        dynamicsWorld->stepSimulation(1.f / 60.f, 10);
+        // "Paso de física" manual: solo integramos la rotación
+        orientation.integrate(angVelX, angVelY, angVelZ, dt);
 
-        // Limpiar pantalla con color gris oscuro
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-
-        // Alejamos la "cámara" 10 unidades para ver el cubo
         glTranslatef(0, 0, -10);
 
-        // Obtener la matriz de transformación desde Bullet
-        btTransform trans;
-        body->getMotionState()->getWorldTransform(trans);
         float m[16];
-        trans.getOpenGLMatrix(m);
-        
-        // Multiplicamos la matriz de OpenGL por la de Bullet
+        orientation.toOpenGLMatrix(m, 0.f, 0.f, 0.f);
         glMultMatrixf(m);
 
-        // DIBUJAR EL CUBO (Wireframe verde)
+        // Cubo en wireframe verde (igual que el original)
         glBegin(GL_LINES);
-            glColor3f(0.0f, 1.0f, 0.0f); // Color verde
+            glColor3f(0.0f, 1.0f, 0.0f);
             // Aristas delanteras
             glVertex3f(-1,-1, 1); glVertex3f( 1,-1, 1);
             glVertex3f( 1,-1, 1); glVertex3f( 1, 1, 1);
@@ -98,17 +135,6 @@ int main() {
 
         window.display();
     }
-
-    // 6. LIMPIEZA
-    dynamicsWorld->removeRigidBody(body);
-    delete body->getMotionState();
-    delete body;
-    delete shape;
-    delete dynamicsWorld;
-    delete solver;
-    delete broadphase;
-    delete dispatcher;
-    delete colConfig;
 
     return 0;
 }
